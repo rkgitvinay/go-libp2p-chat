@@ -37,6 +37,7 @@ import (
 	"log"
 	mrand "math/rand"
 	"os"
+	"path/filepath"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
@@ -66,12 +67,60 @@ func readData(rw *bufio.ReadWriter) {
 			return
 		}
 		if str != "\n" {
-			// Green console colour: 	\x1b[32m
-			// Reset console colour: 	\x1b[0m
-			fmt.Printf("\x1b[32m%s\x1b[0m> ", str)
+			if len(str) > 5 && str[:5] == "FILE:" {
+				handleFileReceive(str[5:], rw)
+			} else {
+				// Display chat message
+				fmt.Printf("\x1b[32m%s\x1b[0m> ", str)
+			}
+		}
+	}
+}
+
+func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
+	// Extract filename and size from metadata
+	var filename string
+	var filesize int64
+	fmt.Sscanf(metadata, "%s %d", &filename, &filesize)
+
+	// New file name where the file will be saved
+	newFileName := "./received/" + filepath.Base(filename)
+
+	fmt.Printf("Receiving file: %s (%d bytes)\n", filename, filesize)
+
+	// Create the file where the data will be saved
+	file, err := os.Create(newFileName)
+	if err != nil {
+		fmt.Printf("Failed to create file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	received := int64(0)
+	buf := make([]byte, 4096)
+
+	// Keep reading the stream and writing to the file until we have received the entire file
+	for received < filesize {
+		n, err := rw.Read(buf)
+		if err != nil {
+			// If error occurs while reading, print and return
+			fmt.Printf("Error reading file: %v\n", err)
+			return
 		}
 
+		// Write the data read from the stream into the file
+		_, err = file.Write(buf[:n])
+		if err != nil {
+			// If error occurs while writing, print and return
+			fmt.Printf("Error writing file: %v\n", err)
+			return
+		}
+
+		// Update the number of bytes received
+		received += int64(n)
 	}
+
+	fmt.Printf("File %s received and saved successfully.\n", newFileName)
 }
 
 func writeData(rw *bufio.ReadWriter) {
@@ -85,10 +134,54 @@ func writeData(rw *bufio.ReadWriter) {
 			panic(err)
 		}
 
-		rw.WriteString(fmt.Sprintf("%s\n", sendData))
+		if len(sendData) > 5 && sendData[:5] == "send:" {
+			// Handle file transfer
+			filename := sendData[5 : len(sendData)-1] // Remove "send:" prefix and newline
+			sendFile(filename, rw)
+		} else {
+			// Send chat message
+			rw.WriteString(fmt.Sprintf("%s\n", sendData))
+			rw.Flush()
+		}
+	}
+}
+
+func sendFile(filename string, rw *bufio.ReadWriter) {
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Printf("Failed to open file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	// Get file info for size
+	info, err := file.Stat()
+	if err != nil {
+		fmt.Printf("Failed to get file info: %v\n", err)
+		return
+	}
+	filesize := info.Size()
+
+	// Send metadata
+	rw.WriteString(fmt.Sprintf("FILE:%s %d\n", filename, filesize))
+	rw.Flush()
+
+	// Send file data
+	buf := make([]byte, 4096)
+	for {
+		n, err := file.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Printf("Error reading file: %v\n", err)
+			return
+		}
+		rw.Write(buf[:n])
 		rw.Flush()
 	}
 
+	fmt.Printf("File %s sent successfully.\n", filename)
 }
 
 func main() {
