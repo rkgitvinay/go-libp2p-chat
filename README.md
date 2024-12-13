@@ -4,7 +4,7 @@ This article introduces how to develop a simple peer-to-peer chat application us
 ````
 $ git clone https://github.com/rkgitvinay/go-libp2p-chat.git
 
-$ cd go-libp2p-chat
+$ cd go-libp2p-chat/chat
 ````
 
 ## Compile and Start

@@ -1,0 +1,11 @@
+DBPath: ./db
+
+Port: :14700
+
+Redis: 
+  Url: localhost:6379
+  Password:
+  DB: 0
+
+GRPC:
+  Port: :50051
