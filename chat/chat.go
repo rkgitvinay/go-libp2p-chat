@@ -66,7 +66,7 @@ func readData(rw *bufio.ReadWriter) {
 			return
 		}
 		if str != "\n" {
-			if str[:5] == "FILE:" {
+			if len(str) > 5 && str[:5] == "FILE:" {
 				handleFileReceive(str[5:], rw)
 			} else {
 				// Display chat message
@@ -116,7 +116,7 @@ func writeData(rw *bufio.ReadWriter) {
 			panic(err)
 		}
 
-		if len(sendData) > 6 && sendData[:5] == "send:" {
+		if len(sendData) > 5 && sendData[:5] == "send:" {
 			// Handle file transfer
 			filename := sendData[5 : len(sendData)-1] // Remove "send:" prefix and newline
 			sendFile(filename, rw)
