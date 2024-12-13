@@ -37,6 +37,7 @@ import (
 	"log"
 	mrand "math/rand"
 	"os"
+	"path/filepath"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
@@ -82,8 +83,13 @@ func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
 	var filesize int64
 	fmt.Sscanf(metadata, "%s %d", &filename, &filesize)
 
+	// New file name where the file will be saved
+	newFileName := "./received/" + filepath.Base(filename)
+
 	fmt.Printf("Receiving file: %s (%d bytes)\n", filename, filesize)
-	file, err := os.Create(filename)
+
+	// Create the file where the data will be saved
+	file, err := os.Create(newFileName)
 	if err != nil {
 		fmt.Printf("Failed to create file: %v\n", err)
 		return
@@ -92,17 +98,29 @@ func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
 
 	received := int64(0)
 	buf := make([]byte, 4096)
+
+	// Keep reading the stream and writing to the file until we have received the entire file
 	for received < filesize {
 		n, err := rw.Read(buf)
 		if err != nil {
+			// If error occurs while reading, print and return
 			fmt.Printf("Error reading file: %v\n", err)
 			return
 		}
-		file.Write(buf[:n])
+
+		// Write the data read from the stream into the file
+		_, err = file.Write(buf[:n])
+		if err != nil {
+			// If error occurs while writing, print and return
+			fmt.Printf("Error writing file: %v\n", err)
+			return
+		}
+
+		// Update the number of bytes received
 		received += int64(n)
 	}
 
-	fmt.Printf("File %s received successfully.\n", filename)
+	fmt.Printf("File %s received and saved successfully.\n", newFileName)
 }
 
 func writeData(rw *bufio.ReadWriter) {
