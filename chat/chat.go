@@ -11,6 +11,7 @@ import (
 	mrand "math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
@@ -21,30 +22,41 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
-func handleStream(s network.Stream) {
-	log.Println("Got a new stream!")
+var streams sync.Map // Tracks streams for connected peers
 
-	// Create a buffer stream for non blocking read and write.
+func handleStream(s network.Stream) {
+	peerID := s.Conn().RemotePeer()
+	log.Printf("New stream from: %s\n", peerID.Pretty())
+
+	// Create a buffered read-writer for the stream
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
 
-	go readData(rw)
-	go writeData(rw)
+	// Store the stream for bidirectional communication
+	streams.Store(peerID, rw)
 
-	// stream 's' will stay open until you close it (or the other side closes it).
+	// Handle reading and writing in separate goroutines
+	go readData(rw, peerID)
+	go writeData()
+
+	// Keep the stream open
 }
-func readData(rw *bufio.ReadWriter) {
+
+func readData(rw *bufio.ReadWriter, peerID peer.ID) {
 	for {
 		str, _ := rw.ReadString('\n')
 
 		if str == "" {
+			log.Printf("Connection with peer %s closed.\n", peerID.Pretty())
+			streams.Delete(peerID)
 			return
 		}
+
 		if str != "\n" {
 			if len(str) > 5 && str[:5] == "FILE:" {
 				handleFileReceive(str[5:], rw)
 			} else {
 				// Display chat message
-				fmt.Printf("\x1b[32m%s\x1b[0m> ", str)
+				fmt.Printf("[PEER %s] %s> ", peerID.Pretty(), str)
 			}
 		}
 	}
@@ -56,12 +68,9 @@ func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
 	var filesize int64
 	fmt.Sscanf(metadata, "%s %d", &filename, &filesize)
 
-	// New file name where the file will be saved
 	newFileName := "./received/" + filepath.Base(filename)
-
 	fmt.Printf("Receiving file: %s (%d bytes)\n", filename, filesize)
 
-	// Create the file where the data will be saved
 	file, err := os.Create(newFileName)
 	if err != nil {
 		fmt.Printf("Failed to create file: %v\n", err)
@@ -72,54 +81,52 @@ func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
 	received := int64(0)
 	buf := make([]byte, 4096)
 
-	// Keep reading the stream and writing to the file until we have received the entire file
 	for received < filesize {
 		n, err := rw.Read(buf)
 		if err != nil {
-			// If error occurs while reading, print and return
 			fmt.Printf("Error reading file: %v\n", err)
 			return
 		}
 
-		// Write the data read from the stream into the file
 		_, err = file.Write(buf[:n])
 		if err != nil {
-			// If error occurs while writing, print and return
 			fmt.Printf("Error writing file: %v\n", err)
 			return
 		}
 
-		// Update the number of bytes received
 		received += int64(n)
 	}
 
 	fmt.Printf("File %s received and saved successfully.\n", newFileName)
 }
 
-func writeData(rw *bufio.ReadWriter) {
+func writeData() {
 	stdReader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("> ")
 		sendData, err := stdReader.ReadString('\n')
-
 		if err != nil {
 			panic(err)
 		}
 
 		if len(sendData) > 5 && sendData[:5] == "send:" {
-			// Handle file transfer
-			filename := sendData[5 : len(sendData)-1] // Remove "send:" prefix and newline
-			sendFile(filename, rw)
+			// Broadcast file to all connected peers
+			filename := sendData[5 : len(sendData)-1]
+			broadcastFile(filename)
 		} else {
-			// Send chat message
-			rw.WriteString(fmt.Sprintf("%s\n", sendData))
-			rw.Flush()
+			// Broadcast chat message to all peers
+			streams.Range(func(key, value interface{}) bool {
+				peerRW := value.(*bufio.ReadWriter)
+				peerRW.WriteString(fmt.Sprintf("%s\n", sendData))
+				peerRW.Flush()
+				return true
+			})
 		}
 	}
 }
 
-func sendFile(filename string, rw *bufio.ReadWriter) {
+func broadcastFile(filename string) {
 	file, err := os.Open(filename)
 	if err != nil {
 		fmt.Printf("Failed to open file: %v\n", err)
@@ -127,7 +134,6 @@ func sendFile(filename string, rw *bufio.ReadWriter) {
 	}
 	defer file.Close()
 
-	// Get file info for size
 	info, err := file.Stat()
 	if err != nil {
 		fmt.Printf("Failed to get file info: %v\n", err)
@@ -135,26 +141,32 @@ func sendFile(filename string, rw *bufio.ReadWriter) {
 	}
 	filesize := info.Size()
 
-	// Send metadata
-	rw.WriteString(fmt.Sprintf("FILE:%s %d\n", filename, filesize))
-	rw.Flush()
+	// Send file metadata and data to all connected peers
+	streams.Range(func(key, value interface{}) bool {
+		rw := value.(*bufio.ReadWriter)
 
-	// Send file data
-	buf := make([]byte, 4096)
-	for {
-		n, err := file.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			fmt.Printf("Error reading file: %v\n", err)
-			return
-		}
-		rw.Write(buf[:n])
+		// Send metadata
+		rw.WriteString(fmt.Sprintf("FILE:%s %d\n", filename, filesize))
 		rw.Flush()
-	}
 
-	fmt.Printf("File %s sent successfully.\n", filename)
+		// Send file data
+		buf := make([]byte, 4096)
+		for {
+			n, err := file.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				fmt.Printf("Error reading file: %v\n", err)
+				return false
+			}
+			rw.Write(buf[:n])
+			rw.Flush()
+		}
+		return true
+	})
+
+	fmt.Printf("File %s broadcasted successfully.\n", filename)
 }
 
 func main() {
@@ -166,36 +178,27 @@ func main() {
 	flag.Parse()
 
 	if *help {
-		fmt.Printf("This program demonstrates a simple p2p chat application using libp2p\n\n")
-		fmt.Println("Usage: Run './chat -sp <SOURCE_PORT>' where <SOURCE_PORT> can be any port number.")
-		fmt.Println("Now run './chat -d <MULTIADDR>' where <MULTIADDR> is multiaddress of previous listener host.")
-
+		fmt.Printf("This program demonstrates a multi-node p2p chat and file-sharing application using libp2p\n\n")
+		fmt.Println("Usage:")
+		fmt.Println("  Listener: ./chat -sp <SOURCE_PORT>")
+		fmt.Println("  Dialer: ./chat -d <MULTIADDR>")
 		os.Exit(0)
 	}
 
-	// If debug is enabled, use a constant random source to generate the peer ID. Only useful for debugging,
-	// off by default. Otherwise, it uses rand.Reader.
 	var r io.Reader
 	if *debug {
-		// Use the port number as the randomness source.
-		// This will always generate the same host ID on multiple executions, if the same port number is used.
-		// Never do this in production code.
 		r = mrand.New(mrand.NewSource(int64(*sourcePort)))
 	} else {
 		r = rand.Reader
 	}
 
-	// Creates a new RSA key pair for this host.
 	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
 	if err != nil {
 		panic(err)
 	}
 
-	// 0.0.0.0 will listen on any interface device.
 	sourceMultiAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", *sourcePort))
 
-	// libp2p.New constructs a new libp2p Host.
-	// Other options can be added here.
 	host, err := libp2p.New(
 		context.Background(),
 		libp2p.ListenAddrs(sourceMultiAddr),
@@ -206,13 +209,10 @@ func main() {
 		panic(err)
 	}
 
-	if *dest == "" {
-		// Set a function as stream handler.
-		// This function is called when a peer connects, and starts a stream with this protocol.
-		// Only applies on the receiving side.
-		host.SetStreamHandler("/chat/1.0.0", handleStream)
+	host.SetStreamHandler("/chat/1.0.0", handleStream)
 
-		// Let's get the actual TCP port from our listen multiaddr, in case we're using 0 (default; random available port).
+	if *dest == "" {
+		// Listener mode
 		var port string
 		for _, la := range host.Network().ListenAddresses() {
 			if p, err := la.ValueForProtocol(multiaddr.P_TCP); err == nil {
@@ -222,53 +222,38 @@ func main() {
 		}
 
 		if port == "" {
-			panic("was not able to find actual local port")
+			panic("Was not able to find actual local port")
 		}
 
 		fmt.Printf("Run './chat -d /ip4/127.0.0.1/tcp/%v/p2p/%s' on another console.\n", port, host.ID().Pretty())
-		fmt.Println("You can replace 127.0.0.1 with public IP as well.")
-		fmt.Printf("\nWaiting for incoming connection\n\n")
+		fmt.Println("Waiting for incoming connections...")
 
-		// Hang forever
-		<-make(chan struct{})
+		select {}
 	} else {
-		fmt.Println("This node's multiaddresses:")
-		for _, la := range host.Addrs() {
-			fmt.Printf(" - %v\n", la)
-		}
-		fmt.Println()
-
-		// Turn the destination into a multiaddr.
+		// Dialer mode
 		maddr, err := multiaddr.NewMultiaddr(*dest)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		// Extract the peer ID from the multiaddr.
 		info, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		// Add the destination's peer multiaddress in the peerstore.
-		// This will be used during connection and stream creation by libp2p.
 		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
-		// Start a stream with the destination.
-		// Multiaddress of the destination peer is fetched from the peerstore using 'peerId'.
 		s, err := host.NewStream(context.Background(), info.ID, "/chat/1.0.0")
 		if err != nil {
 			panic(err)
 		}
 
-		// Create a buffered stream so that read and writes are non blocking.
 		rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+		streams.Store(info.ID, rw)
 
-		// Create a thread to read and write data.
-		go writeData(rw)
-		go readData(rw)
+		go writeData()
+		go readData(rw, info.ID)
 
-		// Hang forever.
 		select {}
 	}
 }
